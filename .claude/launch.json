@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "penfight-web",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "flutter run -d web-server --web-hostname 127.0.0.1 --web-port \"$PORT\" $([ -f supabase.json ] && echo --dart-define-from-file=supabase.json)"
+      ],
+      "autoPort": true
+    }
+  ]
+}
