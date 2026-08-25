@@ -50,3 +50,8 @@ supabase.json
 
 # Flutter SDK fetched by the Vercel build
 .flutter-sdk/
+
+# Android signing — never commit keystores or their passwords
+*.jks
+*.keystore
+android/key.properties
