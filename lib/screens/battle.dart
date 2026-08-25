@@ -454,6 +454,10 @@ class _BattleScreenState extends State<BattleScreen>
     _release();
   }
 
+  /// Exposed for tests: move the contact slider.
+  @visibleForTesting
+  void debugSetContact(double v) => setState(() => _contact = v);
+
   /// Exposed for tests: whether stage one has been completed.
   @visibleForTesting
   bool get debugContactLocked => _contactLocked;
@@ -783,13 +787,17 @@ class _BattleScreenState extends State<BattleScreen>
       );
 
   Widget _penOnTable(Pen p, double scale) {
-    const len = kPenLength;
-    const thick = kPenRadius * 2;
+    // Draw at the already-scaled size rather than scaling a full-size glyph:
+    // Transform.scale keeps the child's ORIGINAL layout box, so the painted
+    // pen ended up offset from where Positioned placed it — which is why the
+    // contact ring appeared to float off the pen.
+    final len = kPenLength * scale;
+    final thick = kPenRadius * 2 * scale;
+
     return Positioned(
-      left: p.pos.x * scale - (len * scale) / 2,
-      top: p.pos.y * scale - (thick * scale) / 2,
-      child: Transform.scale(
-        scale: scale,
+      left: p.pos.x * scale - len / 2,
+      top: p.pos.y * scale - thick / 2,
+      child: IgnorePointer(
         child: PenGlyph(
           color: PF.inkFor(p.seat),
           length: len,

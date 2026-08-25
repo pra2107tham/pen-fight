@@ -1,4 +1,4 @@
-package com.example.pen_fight
+package dev.pra2107tham.penfight
 
 import io.flutter.embedding.android.FlutterActivity
 
