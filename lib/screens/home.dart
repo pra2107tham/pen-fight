@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../analytics.dart';
 import '../net/identity.dart';
 import '../net/room.dart';
 import '../net/session.dart';
@@ -24,6 +25,12 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _checkForSession();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    Analytics.screen('home');
   }
 
   Future<void> _checkForSession() async {

@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../analytics.dart';
 import '../game/ai.dart';
 import '../game/sim.dart';
 import '../net/room.dart';
@@ -214,6 +215,9 @@ class _BattleScreenState extends State<BattleScreen>
       ..addListener(_onFrame)
       ..addStatusListener(_onAnimStatus);
 
+    Analytics.screen('battle');
+    Analytics.matchStarted(_mode, players: widget.playerCount);
+
     final r = widget.room;
     if (r != null) {
       r.onPeerFlick = (seat, dir, power, grab, settled, nextTurn) {
@@ -286,6 +290,7 @@ class _BattleScreenState extends State<BattleScreen>
     if (r == null) return;
     r.closeRoom();
     ActiveSession.clear();
+    Analytics.matchEnded(_mode, outcome: 'forfeit', turns: _turnsPlayed);
     Navigator.of(context).pushReplacement(MaterialPageRoute(
       builder: (_) => WinScreen(
         winnerName: widget.nameFor(r.mySeat),
@@ -324,6 +329,13 @@ class _BattleScreenState extends State<BattleScreen>
     });
     if (_sim.isOver) {
       final w = _sim.winnerSeat ?? 0;
+      Analytics.matchEnded(
+        _mode,
+        outcome: (!_online && !_vsComputer)
+            ? 'decided'
+            : (w == _mySeat ? 'win' : 'loss'),
+        turns: _turnsPlayed,
+      );
       Future.delayed(const Duration(milliseconds: 450), () {
         if (!mounted) return;
         Navigator.of(context).push(MaterialPageRoute(
@@ -428,10 +440,18 @@ class _BattleScreenState extends State<BattleScreen>
       _pendingTurn = nextTurn ?? (_online ? _turn : _sim.nextLivingSeat(seat));
     });
 
+    _turnsPlayed++;
     _anim
       ..duration = Duration(milliseconds: (frames.length * 1000 / 60).round())
       ..forward(from: 0);
   }
+
+  /// How this match is being played, for analytics.
+  String get _mode =>
+      _online ? 'online' : (_vsComputer ? 'computer' : 'local');
+
+  /// Shots taken this match, so we can see how long games actually run.
+  int _turnsPlayed = 0;
 
   /// The seat this device is currently playing.
   int get _actingSeat => _online ? _mySeat : _turn;

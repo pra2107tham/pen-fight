@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../analytics.dart';
 import '../game/sim.dart';
 import '../theme.dart';
 import '../widgets/chunky.dart';
@@ -17,6 +18,12 @@ class LocalLobbyScreen extends StatefulWidget {
 
 class _LocalLobbyScreenState extends State<LocalLobbyScreen> {
   int _count = 2;
+
+  @override
+  void initState() {
+    super.initState();
+    Analytics.screen('local_lobby');
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(

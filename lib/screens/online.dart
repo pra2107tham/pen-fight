@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../analytics.dart';
 import '../net/identity.dart';
 import '../net/room.dart';
 import '../net/session.dart';
@@ -50,6 +51,8 @@ class _OnlineScreenState extends State<OnlineScreen> {
 
     if (!mounted) return;
     setState(() => _busy = false);
+
+    Analytics.joinAttempt(failure?.name ?? 'ok');
 
     if (failure != null) {
       setState(() => _joinError = failure.message);

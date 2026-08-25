@@ -34,5 +34,29 @@
 </head>
 <body>
   <script src="flutter_bootstrap.js" async></script>
+
+  <!--
+    Vercel Web Analytics. The script is only served on Vercel deployments, so
+    it 404s harmlessly during local development.
+
+    Flutter renders to a canvas and never changes the URL, so Vercel would
+    only ever record a single page view. The queue below lets the Dart side
+    report screen changes as custom events — see lib/analytics.dart.
+  -->
+  <script>
+    window.va = window.va || function () {
+      (window.vaq = window.vaq || []).push(arguments);
+    };
+    // Called from Dart. Kept tiny and defensive: analytics must never be
+    // able to break the game.
+    window.penFightTrack = function (name, props) {
+      try {
+        window.va('event', { name: name, data: props || {} });
+      } catch (e) {
+        /* analytics is best-effort */
+      }
+    };
+  </script>
+  <script defer src="/_vercel/insights/script.js"></script>
 </body>
 </html>
