@@ -15,7 +15,6 @@
       ]
     },
     {
-      "comment": "Hashed build assets never change under the same name.",
       "source": "/assets/(.*)",
       "headers": [
         {
@@ -25,7 +24,6 @@
       ]
     },
     {
-      "comment": "Never cache the entry point, or players get a stale build.",
       "source": "/(index.html|flutter_service_worker.js|version.json)",
       "headers": [
         { "key": "Cache-Control", "value": "no-cache, must-revalidate" }

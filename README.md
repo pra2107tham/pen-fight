@@ -59,6 +59,12 @@ Without those variables the site still builds and plays offline; only online
 tables are disabled. The build script fetches its own Flutter SDK, so the
 first deploy takes a few minutes.
 
+`vercel.json` also sets caching: hashed files under `/assets/` are immutable
+and cached for a year, while `index.html`, the service worker, and
+`version.json` are marked `no-cache` so players never get stuck on a stale
+build. Deep links are rewritten to `index.html`, since routing happens
+client-side.
+
 The anon key is designed to be public — it is safe in a client bundle,
 provided row-level security is on. The schema enables RLS on `rooms`; see the
 comments in `supabase/schema.sql` for what the policies do and do not protect.
