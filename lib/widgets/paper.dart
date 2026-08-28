@@ -1,25 +1,105 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import '../theme.dart';
 
 /// Ruled notebook paper: 27px lines, a margin rule at x=44, faint dot grid.
 /// Recipe matches the design's repeating-linear-gradient exactly.
+///
+/// The paper sits behind everything and never changes, so it is painted into
+/// its own layer. Without that boundary it shared a layer with the game, and
+/// every animation frame re-recorded the whole background along with it.
 class PaperBackground extends StatelessWidget {
   final Widget child;
   const PaperBackground({super.key, required this.child});
 
   @override
-  Widget build(BuildContext context) => Container(
+  Widget build(BuildContext context) => ColoredBox(
         color: PF.paper,
-        child: CustomPaint(
-          painter: _PaperPainter(),
-          child: child,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: RepaintBoundary(
+                child: CustomPaint(
+                  painter: _PaperPainter(
+                      MediaQuery.devicePixelRatioOf(context)),
+                  isComplex: true,
+                  willChange: false,
+                ),
+              ),
+            ),
+            child,
+          ],
         ),
       );
 }
 
+/// The dot grid, rendered once into a small repeating tile.
+///
+/// Drawn dot by dot it was one `drawCircle` every 3px in both directions —
+/// roughly a quarter of a million draw calls to cover a desktop window, paid
+/// again on every repaint. As a tiled shader it is a single `drawRect`, and
+/// the tile is built once per device pixel ratio for the life of the app.
+class _DotTile {
+  static ui.Image? _image;
+  static ui.Shader? _shader;
+  static double _forDpr = 0;
+
+  /// Dots every 3 logical pixels, as the design specifies. 4x4 of them per
+  /// tile keeps the repeat count down without making the texture large.
+  static const double _spacing = 3;
+  static const int _perSide = 4;
+
+  static ui.Shader shaderFor(double dpr) {
+    final cached = _shader;
+    if (cached != null && _forDpr == dpr) return cached;
+
+    const extent = _spacing * _perSide;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.scale(dpr);
+
+    final dot = Paint()..color = PF.black.withValues(alpha: .05);
+    for (var i = 0; i < _perSide; i++) {
+      for (var j = 0; j < _perSide; j++) {
+        // Centred in its cell so no dot is clipped at the tile seam.
+        canvas.drawCircle(
+          Offset(i * _spacing + _spacing / 2, j * _spacing + _spacing / 2),
+          .5,
+          dot,
+        );
+      }
+    }
+
+    final side = (extent * dpr).round();
+    final image = recorder.endRecording().toImageSync(side, side);
+    final shader = ImageShader(
+      image,
+      TileMode.repeated,
+      TileMode.repeated,
+      // The tile is rendered at device resolution; scale it back to logical
+      // pixels so it stays crisp on high-DPI screens.
+      Matrix4.diagonal3Values(1 / dpr, 1 / dpr, 1).storage,
+    );
+
+    _image?.dispose();
+    _shader?.dispose();
+    _image = image;
+    _shader = shader;
+    _forDpr = dpr;
+    return shader;
+  }
+}
+
 class _PaperPainter extends CustomPainter {
+  final double dpr;
+  const _PaperPainter(this.dpr);
+
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.drawRect(
+        Offset.zero & size, Paint()..shader = _DotTile.shaderFor(dpr));
+
     final line = Paint()
       ..color = PF.rule
       ..strokeWidth = 1.2;
@@ -34,23 +114,16 @@ class _PaperPainter extends CustomPainter {
         ..color = PF.margin.withValues(alpha: .85)
         ..strokeWidth = 1.5,
     );
-
-    final dot = Paint()..color = PF.black.withValues(alpha: .05);
-    for (double y = 0; y < size.height; y += 3) {
-      for (double x = 0; x < size.width; x += 3) {
-        canvas.drawCircle(Offset(x, y), .5, dot);
-      }
-    }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter old) => false;
+  bool shouldRepaint(covariant _PaperPainter old) => old.dpr != dpr;
 }
 
 /// Grid paper used inside the table card.
 class GridPaperPainter extends CustomPainter {
   final double cell;
-  GridPaperPainter({this.cell = 26});
+  const GridPaperPainter({this.cell = 26});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -97,26 +170,56 @@ class _DashedPainter extends CustomPainter {
   final Color color;
   _DashedPainter(this.radius, this.gap, this.dash, this.strokeWidth, this.color);
 
-  @override
-  void paint(Canvas canvas, Size size) {
-    final path = Path()
+  // Walking the path metrics and extracting a sub-path per dash costs a few
+  // hundred Path allocations. The outline only depends on the size, so the
+  // dashes are built once and then just re-stroked when the colour changes.
+  Size? _builtFor;
+  Path? _dashes;
+
+  Path _dashesFor(Size size) {
+    final cached = _dashes;
+    if (cached != null && _builtFor == size) return cached;
+
+    final outline = Path()
       ..addRRect(RRect.fromRectAndRadius(
           Offset.zero & size, Radius.circular(radius)));
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth;
-
-    for (final metric in path.computeMetrics()) {
+    final path = Path();
+    for (final metric in outline.computeMetrics()) {
       double d = 0;
       while (d < metric.length) {
-        canvas.drawPath(
-            metric.extractPath(d, (d + dash).clamp(0, metric.length)), paint);
+        path.addPath(
+            metric.extractPath(d, (d + dash).clamp(0, metric.length)),
+            Offset.zero);
         d += dash + gap;
       }
     }
+
+    _dashes = path;
+    _builtFor = size;
+    return path;
   }
 
   @override
-  bool shouldRepaint(covariant _DashedPainter o) => o.color != color;
+  void paint(Canvas canvas, Size size) {
+    canvas.drawPath(
+      _dashesFor(size),
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeWidth,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedPainter o) {
+    // Carry the built outline across repaints — the widget rebuilds a fresh
+    // painter each time, and only the colour ever actually changes.
+    _dashes = o._dashes;
+    _builtFor = o._builtFor;
+    return o.color != color ||
+        o.radius != radius ||
+        o.dash != dash ||
+        o.gap != gap ||
+        o.strokeWidth != strokeWidth;
+  }
 }

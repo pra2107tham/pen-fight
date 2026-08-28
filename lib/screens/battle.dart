@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -32,6 +33,20 @@ const double kPullRange = 420;
 
 /// Anchors the table rect so tests can map table coords to the screen.
 const Key kTableKey = Key('pf-table');
+
+/// Anchors the layer every pen is drawn on, so tests can find it.
+const Key kPensKey = Key('pf-pens');
+
+/// A pen close enough to an edge to read as "about to fall off".
+bool penInDanger(Pen p) =>
+    p.alive &&
+    (p.pos.x < kDangerBand ||
+        p.pos.x > kTableW - kDangerBand ||
+        p.pos.y < kDangerBand ||
+        p.pos.y > kTableH - kDangerBand);
+
+/// Fields stored per pen per replay frame: x, y, angle, ink, alive, vx, vy.
+const int _kReplayStride = 7;
 
 class BattleScreen extends StatefulWidget {
   final Room? room; // null = local pass & play
@@ -94,8 +109,24 @@ class _BattleScreenState extends State<BattleScreen>
   /// device, so they do not see the previous player's aim.
   bool _awaitingHandover = false;
 
-  // Replay state: we re-run the sim tick by tick so the flick is watchable.
-  List<List<Map<String, dynamic>>> _frames = [];
+  // Replay state: the flick is simulated up front and every tick recorded, so
+  // playing it back is a lookup rather than a re-simulation.
+  //
+  // One flat buffer of doubles, allocated once and reused for every flick.
+  // Held as JSON maps this cost thousands of map allocations to record a
+  // single flick and five more copies on every frame of playback — the
+  // heaviest source of garbage in the game.
+  late final Float64List _replay;
+  int _replayFrames = 0;
+
+  /// Bumped once per replay frame and once per drag move. The pen layer and
+  /// the aim overlay listen to it and repaint themselves, so a flick no
+  /// longer rebuilds the whole screen sixty times a second.
+  final ValueNotifier<int> _paint = ValueNotifier(0);
+
+  /// Fingerprint of everything on screen that is not a pen — see
+  /// [_boardSignature]. Only a change here needs a real rebuild.
+  double _boardSig = 0;
 
   bool get _online => widget.room != null;
   bool get _vsComputer => _bot != null;
@@ -209,6 +240,10 @@ class _BattleScreenState extends State<BattleScreen>
     super.initState();
     _sim = Sim.table(
         width: kTableW, height: kTableH, players: widget.playerCount);
+    // Room for the opening frame, every tick up to the hard stop, and the
+    // authoritative snapshot an online peer may send.
+    _replay = Float64List(
+        (kMaxTicks + 2) * widget.playerCount * _kReplayStride);
     final ai = widget.ai;
     if (ai != null) _bot = PenAi(ai);
     _anim = AnimationController(vsync: this)
@@ -306,14 +341,74 @@ class _BattleScreenState extends State<BattleScreen>
   void dispose() {
     widget.room?.removeListener(_onRoomChange);
     _anim.dispose();
+    _paint.dispose();
     super.dispose();
   }
 
   void _onFrame() {
-    final i = (_anim.value * (_frames.length - 1)).round();
-    if (i >= 0 && i < _frames.length) {
-      setState(() => _sim.restore(_frames[i]));
+    if (_replayFrames == 0) return;
+    final i = (_anim.value * (_replayFrames - 1)).round();
+    if (i < 0 || i >= _replayFrames) return;
+    _applyFrame(i);
+
+    // The pens repaint straight from the sim, so most frames need no rebuild
+    // at all. Only when the meters, a knockout or the danger band actually
+    // change is the rest of the screen worth touching — a handful of times
+    // per flick instead of sixty times a second.
+    _paint.value++;
+    final board = _boardSignature();
+    if (board != _boardSig) {
+      _boardSig = board;
+      setState(() {});
     }
+  }
+
+  /// Record the sim's current state into replay slot [frame].
+  void _capture(Sim s, int frame) {
+    final pens = s.pens;
+    var o = frame * pens.length * _kReplayStride;
+    for (var i = 0; i < pens.length; i++) {
+      final p = pens[i];
+      _replay[o++] = p.pos.x;
+      _replay[o++] = p.pos.y;
+      _replay[o++] = p.angle;
+      _replay[o++] = p.ink;
+      _replay[o++] = p.alive ? 1 : 0;
+      _replay[o++] = p.vel.x;
+      _replay[o++] = p.vel.y;
+    }
+  }
+
+  /// Put the sim back into the state recorded at [frame].
+  void _applyFrame(int frame) {
+    final pens = _sim.pens;
+    var o = frame * pens.length * _kReplayStride;
+    for (var i = 0; i < pens.length; i++) {
+      final p = pens[i];
+      p.pos = Vec2(_replay[o], _replay[o + 1]);
+      p.angle = _replay[o + 2];
+      p.ink = _replay[o + 3];
+      p.alive = _replay[o + 4] != 0;
+      p.vel = Vec2(_replay[o + 5], _replay[o + 6]);
+      p.spin = 0;
+      o += _kReplayStride;
+    }
+  }
+
+  /// Everything on screen that is not a pen, folded into one number: each
+  /// meter's ink, who is out, and who is in the danger band. Comparing this
+  /// is what tells playback whether a rebuild is actually needed.
+  double _boardSignature() {
+    var sig = 0.0;
+    final pens = _sim.pens;
+    for (var i = 0; i < pens.length; i++) {
+      final p = pens[i];
+      sig = sig * 512 +
+          p.ink.round() * 4 +
+          (p.alive ? 2 : 0) +
+          (penInDanger(p) ? 1 : 0);
+    }
+    return sig;
   }
 
   void _onAnimStatus(AnimationStatus s) {
@@ -404,6 +499,8 @@ class _BattleScreenState extends State<BattleScreen>
       _botThinking = false;
       _contact = 0.5;
       _contactLocked = false;
+      _replayFrames = 0;
+      _boardSig = _boardSignature();
     });
   }
 
@@ -414,35 +511,37 @@ class _BattleScreenState extends State<BattleScreen>
       {List<dynamic>? authoritative, int? nextTurn}) {
     final sim = _sim.copy()..applyFlick(seat, dir, power, grab: grab);
 
-    final frames = <List<Map<String, dynamic>>>[sim.snapshot()];
+    var frames = 0;
+    _capture(sim, frames++);
     Vec2? impact;
     var ticks = 0;
     while (ticks < kMaxTicks) {
       sim.step(onImpact: (v) => impact ??= v);
-      frames.add(sim.snapshot());
+      _capture(sim, frames++);
       ticks++;
-      if (sim.pens.every((p) => !p.alive || p.resting)) break;
+      if (sim.allRested) break;
     }
 
     if (authoritative != null) {
       sim.restore(authoritative);
-      frames.add(sim.snapshot());
+      _capture(sim, frames++);
     }
+    _replayFrames = frames;
 
     setState(() {
       _busy = true;
-      _frames = frames;
       _splatAt = impact;
       _splatColor = PF.inkFor(seat);
       // Online, the flicker decides the next turn and ships it. Offline,
       // alternate locally. Either way it is decided here, not when the
       // animation happens to finish.
       _pendingTurn = nextTurn ?? (_online ? _turn : _sim.nextLivingSeat(seat));
+      _boardSig = _boardSignature();
     });
 
     _turnsPlayed++;
     _anim
-      ..duration = Duration(milliseconds: (frames.length * 1000 / 60).round())
+      ..duration = Duration(milliseconds: (frames * 1000 / 60).round())
       ..forward(from: 0);
   }
 
@@ -561,16 +660,9 @@ class _BattleScreenState extends State<BattleScreen>
     return ((s - n).distance / kPullRange).clamp(0.0, 1.0);
   }
 
-  bool _inDanger(Pen p) =>
-      p.alive &&
-      (p.pos.x < kDangerBand ||
-          p.pos.x > kTableW - kDangerBand ||
-          p.pos.y < kDangerBand ||
-          p.pos.y > kTableH - kDangerBand);
-
   @override
   Widget build(BuildContext context) {
-    final anyDanger = _sim.pens.any(_inDanger);
+    final anyDanger = _sim.pens.any(penInDanger);
 
     return PopScope(
       // Android's back button and the browser back gesture both land here;
@@ -742,9 +834,14 @@ class _BattleScreenState extends State<BattleScreen>
                         e.localPosition.dy / scale)),
                 onPointerMove: locked || _dragStart == null
                     ? null
-                    : (e) => setState(() => _dragNow = Offset(
-                        e.localPosition.dx / scale,
-                        e.localPosition.dy / scale)),
+                    : (e) {
+                        // Aiming moves at pointer rate. The overlay and the
+                        // power readout listen for this rather than the whole
+                        // screen rebuilding on every move.
+                        _dragNow = Offset(e.localPosition.dx / scale,
+                            e.localPosition.dy / scale);
+                        _paint.value++;
+                      },
                 onPointerUp: locked ? null : (_) => _release(),
                 // A cancelled pointer is the system interrupting the gesture
                 // (incoming call, scroll steal) — not the player letting go.
@@ -767,8 +864,28 @@ class _BattleScreenState extends State<BattleScreen>
                   borderRadius: BorderRadius.circular(17),
                   child: Stack(
                     children: [
+                      // Grid and label never change, so they get their own
+                      // layer and are rasterized once rather than re-recorded
+                      // behind every frame of play.
                       Positioned.fill(
-                          child: CustomPaint(painter: GridPaperPainter())),
+                        child: RepaintBoundary(
+                          child: CustomPaint(
+                            painter: const GridPaperPainter(),
+                            isComplex: true,
+                            willChange: false,
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(14, 12, 0, 0),
+                              child: Align(
+                                alignment: Alignment.topLeft,
+                                child: Text('TABLE EDGE',
+                                    style: PF.code(10.5,
+                                        color:
+                                            PF.black.withValues(alpha: .45))),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                       // Edge-danger inset: resolves the design's flag #1.
                       Positioned.fill(
                         child: Padding(
@@ -782,15 +899,22 @@ class _BattleScreenState extends State<BattleScreen>
                           ),
                         ),
                       ),
-                      Positioned(
-                        left: 14,
-                        top: 12,
-                        child: Text('TABLE EDGE',
-                            style: PF.code(10.5,
-                                color: PF.black.withValues(alpha: .45))),
+                      // Every pen on a single canvas, repainting straight off
+                      // the sim. As a widget each, a flick meant rebuilding,
+                      // laying out and re-layering five rotated glyphs sixty
+                      // times a second.
+                      Positioned.fill(
+                        child: RepaintBoundary(
+                          child: CustomPaint(
+                            key: kPensKey,
+                            painter: _PensPainter(
+                              sim: _sim,
+                              scale: scale,
+                              repaint: _paint,
+                            ),
+                          ),
+                        ),
                       ),
-                      for (final p in _sim.pens)
-                        if (p.alive) _penOnTable(p, scale),
                       if (_splatAt != null) _splat(scale),
                       // Stage one feedback: show where the shot will land on
                       // the pen, before any aiming happens.
@@ -806,30 +930,12 @@ class _BattleScreenState extends State<BattleScreen>
         }),
       );
 
-  Widget _penOnTable(Pen p, double scale) {
-    // Draw at the already-scaled size rather than scaling a full-size glyph:
-    // Transform.scale keeps the child's ORIGINAL layout box, so the painted
-    // pen ended up offset from where Positioned placed it — which is why the
-    // contact ring appeared to float off the pen.
-    final len = kPenLength * scale;
-    final thick = kPenRadius * 2 * scale;
+  Widget _aimLine(double scale) => ValueListenableBuilder<int>(
+        valueListenable: _paint,
+        builder: (_, _, _) => _aimOverlay(scale),
+      );
 
-    return Positioned(
-      left: p.pos.x * scale - len / 2,
-      top: p.pos.y * scale - thick / 2,
-      child: IgnorePointer(
-        child: PenGlyph(
-          color: PF.inkFor(p.seat),
-          length: len,
-          thickness: thick,
-          angle: p.angle,
-          danger: _inDanger(p),
-        ),
-      ),
-    );
-  }
-
-  Widget _aimLine(double scale) {
+  Widget _aimOverlay(double scale) {
     final seat = _online ? _mySeat : _turn;
     final me = _sim.seat(seat);
     if (me == null || !me.alive) return const SizedBox.shrink();
@@ -1011,33 +1117,48 @@ class _BattleScreenState extends State<BattleScreen>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text('STEP 2 · DRAG TO AIM',
-                    style: PF.bold(12, w: 700, ls: 1.2)),
-              ),
-              Text('${(_power * 100).round()}%',
-                  style: PF.code(13, color: PF.red)),
-            ],
-          ),
-          const SizedBox(height: 10),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(7),
-            child: Stack(
-              children: [
-                Container(height: 14, color: PF.meterTrack),
-                FractionallySizedBox(
-                  widthFactor: _power,
-                  child: Container(
-                    height: 14,
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(colors: [PF.red, PF.orange]),
+          // The percentage and the bar are the only things that move while
+          // aiming, so they are the only things that rebuild.
+          ValueListenableBuilder<int>(
+            valueListenable: _paint,
+            builder: (_, _, _) {
+              final power = _power;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text('STEP 2 · DRAG TO AIM',
+                            style: PF.bold(12, w: 700, ls: 1.2)),
+                      ),
+                      Text('${(power * 100).round()}%',
+                          style: PF.code(13, color: PF.red)),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(7),
+                    child: Stack(
+                      children: [
+                        Container(height: 14, color: PF.meterTrack),
+                        FractionallySizedBox(
+                          widthFactor: power,
+                          child: Container(
+                            height: 14,
+                            decoration: const BoxDecoration(
+                              gradient:
+                                  LinearGradient(colors: [PF.red, PF.orange]),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              );
+            },
           ),
           const SizedBox(height: 8),
           Row(
@@ -1250,6 +1371,72 @@ class _MeterCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Exposes where each pen is actually drawn, so tests can assert the painted
+/// pen and the contact ring agree on the same point.
+abstract class PenPlacement {
+  /// Centre of [seat]'s drawn pen, in the pen layer's own coordinates.
+  Offset? centreForSeat(int seat);
+}
+
+/// Draws every pen on the table onto one canvas.
+///
+/// Repaints are driven by [repaint] rather than by rebuilding widgets, so a
+/// flick costs one canvas pass per frame instead of a rebuild, a re-layout
+/// and a fresh transform and clip layer for each pen.
+class _PensPainter extends CustomPainter implements PenPlacement {
+  final Sim sim;
+  final double scale;
+
+  _PensPainter({
+    required this.sim,
+    required this.scale,
+    required Listenable repaint,
+  }) : super(repaint: repaint);
+
+  /// Where each seat's pen was last actually drawn, recorded by [paint]. Held
+  /// rather than recomputed so a test checks the placement the canvas used,
+  /// not a second copy of the same arithmetic that could drift from it.
+  final List<Offset?> _drawnAt = List<Offset?>.filled(kMaxPlayers, null);
+
+  @override
+  Offset? centreForSeat(int seat) =>
+      seat >= 0 && seat < _drawnAt.length ? _drawnAt[seat] : null;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final length = kPenLength * scale;
+    final thickness = kPenRadius * 2 * scale;
+
+    _drawnAt.fillRange(0, _drawnAt.length, null);
+    for (final p in sim.pens) {
+      if (!p.alive) continue;
+      final centre = Offset(p.pos.x * scale, p.pos.y * scale);
+      if (p.seat < _drawnAt.length) _drawnAt[p.seat] = centre;
+      canvas.save();
+      canvas.translate(centre.dx, centre.dy);
+      canvas.rotate(p.angle);
+      paintPen(
+        canvas,
+        color: PF.inkFor(p.seat),
+        length: length,
+        thickness: thickness,
+        danger: penInDanger(p),
+      );
+      canvas.restore();
+    }
+  }
+
+  // Frame-to-frame repaints come through [repaint]; this only has to catch a
+  // rebuild that swaps in a different table or a resized one.
+  @override
+  bool shouldRepaint(covariant _PensPainter o) {
+    // A rebuild hands over a fresh painter. Carry the recorded placements
+    // across, or one that needs no repaint would report nothing drawn.
+    _drawnAt.setRange(0, _drawnAt.length, o._drawnAt);
+    return !identical(o.sim, sim) || o.scale != scale;
   }
 }
 
