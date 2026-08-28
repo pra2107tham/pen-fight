@@ -34,6 +34,18 @@ else
   echo "==> SUPABASE_URL / SUPABASE_ANON_KEY not set — online play disabled"
 fi
 
-flutter build web --release "${DEFINES[@]+"${DEFINES[@]}"}"
+# --wasm compiles the app to WebAssembly and renders with skwasm. It is both
+# smaller over the wire and markedly faster at running the physics than the
+# JavaScript build. A dart2js + CanvasKit build is emitted alongside it and
+# flutter.js picks that one automatically on browsers without WasmGC, so
+# nothing is dropped — see build/web/flutter_bootstrap.js.
+#
+# --no-web-resources-cdn serves CanvasKit and skwasm from this deployment
+# instead of gstatic.com. Same origin means no extra DNS lookup and TLS
+# handshake before the renderer can even start downloading, and the site keeps
+# working on networks that block Google's CDN. The service worker versions
+# those files by content hash, so a Flutter upgrade still invalidates them.
+flutter build web --release --wasm --no-web-resources-cdn \
+  "${DEFINES[@]+"${DEFINES[@]}"}"
 
 echo "==> Built build/web"

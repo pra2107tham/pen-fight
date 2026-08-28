@@ -59,11 +59,23 @@ Without those variables the site still builds and plays offline; only online
 tables are disabled. The build script fetches its own Flutter SDK, so the
 first deploy takes a few minutes.
 
-`vercel.json` also sets caching: hashed files under `/assets/` are immutable
-and cached for a year, while `index.html`, the service worker, and
+`vercel.json` also sets caching: files under `/assets/` are cached for a year,
+while `index.html`, `flutter_bootstrap.js`, the service worker and
 `version.json` are marked `no-cache` so players never get stuck on a stale
 build. Deep links are rewritten to `index.html`, since routing happens
 client-side.
+
+The build script passes two flags worth knowing about:
+
+- `--wasm` compiles the app to WebAssembly and renders with skwasm. It is
+  both smaller over the wire (~2.35 MB gzipped against ~2.87 MB) and markedly
+  faster at running the physics. A dart2js + CanvasKit build is emitted
+  alongside it and `flutter.js` picks that automatically on browsers without
+  WasmGC, so nothing is lost.
+- `--no-web-resources-cdn` serves CanvasKit and skwasm from the deployment
+  rather than `gstatic.com`: no second DNS lookup and TLS handshake before
+  the renderer can start downloading, and the game still works on networks
+  that block Google's CDN.
 
 The anon key is designed to be public — it is safe in a client bundle,
 provided row-level security is on. The schema enables RLS on `rooms`; see the
@@ -81,6 +93,32 @@ the AI tests play hundreds of full matches to assert the win rates hold.
 
 A screenshot harness lives in `tool/capture.dart`; it renders the battle
 screen to a PNG and is not part of the suite.
+
+## Performance
+
+The game loop is built around not doing work. Worth knowing before changing it:
+
+- `sim.dart`'s `step()` runs on raw doubles rather than `Vec2` values, because
+  the AI calls it millions of times per turn and the allocations dominated
+  everything else. Keep the arithmetic in the order it is written — the
+  netcode's determinism rests on both clients computing identical results.
+- Ruthless looks a ply ahead only down a shortlist of the best candidate
+  shots, not all 700. The lookahead only ever subtracts, so a shot that lost
+  on its own merits cannot be rescued by it.
+- Playing a flick back must not call `setState`. The pens repaint from a
+  notifier, and the rest of the screen rebuilds only when the meters, a
+  knockout or the danger band actually change.
+- The paper background and the table's grid each live behind a
+  `RepaintBoundary`. Without one they share a layer with the game and get
+  re-recorded on every frame of play.
+
+`tool/bench.dart` measures the sim and the AI. Run it through dart2js rather
+than on the VM — the game ships as JavaScript, and allocation costs far more
+there:
+
+```bash
+dart compile js -O2 -o /tmp/bench.js tool/bench.dart && node /tmp/bench.js
+```
 
 ## How it fits together
 
