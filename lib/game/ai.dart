@@ -40,6 +40,16 @@ extension DifficultyInfo on Difficulty {
   /// How many replies to try when looking ahead.
   int get replySamples => 26;
 
+  /// How many of the best candidate shots get a ply of lookahead.
+  ///
+  /// Looking ahead costs [replySamples] full settles, so running it on every
+  /// candidate meant 700 x 27 settles for one Ruthless turn — seconds of a
+  /// frozen tab on the web. Shots outside the leading group lost on their own
+  /// merits and cannot be rescued by a lookahead bonus, since the reply term
+  /// only ever subtracts. Spending the lookahead on the shortlist instead
+  /// costs a fraction as much and decides between the same shots.
+  int get finalists => searchesReplies ? 24 : 0;
+
   /// Random error added to the chosen aim, in radians. The bot is made
   /// beatable by making it miss, not by hiding information from it.
   double get aimJitter => switch (this) {
@@ -95,6 +105,10 @@ class PenAi {
   PenAi(this.difficulty, {int? seed}) : _rng = math.Random(seed);
 
   /// Choose a shot for [seat]. Returns null if that pen cannot play.
+  ///
+  /// Two phases: score every candidate on how the shot itself plays out, then
+  /// spend the expensive one-ply lookahead only on the shortlist that could
+  /// still win. See [DifficultyInfo.finalists].
   AiShot? chooseShot(Sim sim, int seat) {
     final me = sim.seat(seat);
     if (me == null || !me.alive) return null;
@@ -103,15 +117,48 @@ class PenAi {
         sim.pens.where((p) => p.alive && p.seat != seat).toList();
     if (opponents.isEmpty) return null;
 
-    AiShot? best;
-
+    final candidates = <AiShot>[];
     for (var i = 0; i < difficulty.samples; i++) {
       final candidate = _sample(sim, me, opponents, i);
-      if (candidate == null) continue;
-      if (best == null || candidate.score > best.score) best = candidate;
+      if (candidate != null) candidates.add(candidate);
+    }
+    if (candidates.isEmpty) return null;
+
+    final shortlist = difficulty.finalists;
+    if (shortlist == 0) {
+      var best = candidates.first;
+      for (final c in candidates) {
+        if (c.score > best.score) best = c;
+      }
+      return _degrade(best, me);
     }
 
-    if (best == null) return null;
+    // Strongest first, then look a ply ahead down the shortlist and keep
+    // whichever survives its own best answer.
+    candidates.sort((a, b) => b.score.compareTo(a.score));
+    final depth = math.min(shortlist, candidates.length);
+
+    var best = candidates.first;
+    var bestScore = double.negativeInfinity;
+    for (var i = 0; i < depth; i++) {
+      final c = candidates[i];
+      // Replay the shot to get the position it leaves behind. Cheaper than
+      // holding 700 settled boards in memory, and identical either way.
+      final after = sim.copy()..applyFlick(seat, c.direction, c.power, grab: c.grab);
+      after.settle();
+
+      // A shot that wins the exchange but hands over an easy kill is not a
+      // good shot.
+      final score = after.isOver
+          ? c.score
+          : c.score - _bestReplyValue(after, seat) * 0.85;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    }
+
     return _degrade(best, me);
   }
 
@@ -142,20 +189,11 @@ class PenAi {
     final trial = sim.copy()..applyFlick(me.seat, dir, power, grab: grab);
     final result = trial.settle();
 
-    var score = _score(trial, result, me.seat);
-
-    // Look one ply ahead: subtract how much damage the best human reply
-    // would do. A shot that wins the exchange but hands over an easy kill
-    // is not a good shot.
-    if (difficulty.searchesReplies && !trial.isOver) {
-      score -= _bestReplyValue(trial, me.seat) * 0.85;
-    }
-
     return AiShot(
       direction: dir,
       power: power,
       grab: grab,
-      score: score,
+      score: _score(trial, result, me.seat),
     );
   }
 

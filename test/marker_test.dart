@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pen_fight/game/sim.dart';
 import 'package:pen_fight/screens/battle.dart';
-import 'package:pen_fight/widgets/chunky.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -46,9 +45,10 @@ void main() {
   });
 
   testWidgets('the drawn pen is centred on the pen position', (t) async {
-    // This is the property the bug broke: Transform.scale kept the child's
-    // original layout box, so the PAINTED pen sat far from the coordinate
-    // Positioned used — and the ring, positioned correctly, floated off it.
+    // This is the property the bug broke: the pen was painted somewhere other
+    // than the coordinate the ring was placed at, so the ring floated off it.
+    // The pens now share one canvas, so the check asks the painter itself
+    // where it puts the pen and compares that against the ring's own space.
     await t.pumpWidget(const MaterialApp(
         home: BattleScreen(names: ['BLUE', 'RED'])));
     await t.pumpAndSettle();
@@ -60,26 +60,24 @@ void main() {
     final table = t.getRect(find.byKey(kTableKey));
     final scale = math.min(table.width / kTableW, table.height / kTableH);
 
-    // Where the pen's own rendered box actually lands on screen.
-    final glyphBoxes = find.byType(PenGlyph).evaluate().map((e) {
-      final ro = e.renderObject as RenderBox;
-      final tl = ro.localToGlobal(Offset.zero);
-      return Rect.fromLTWH(tl.dx, tl.dy, ro.size.width, ro.size.height);
-    }).toList();
+    // Where the pen layer actually draws this pen, in screen space.
+    final layer = t.getRect(find.byKey(kPensKey));
+    final placement = t
+        .widgetList<CustomPaint>(find.byKey(kPensKey))
+        .map((w) => w.painter)
+        .whereType<PenPlacement>()
+        .single;
+    final drawn = layer.topLeft + placement.centreForSeat(pen.seat)!;
 
-    // The acting pen's centre, in the same screen space.
+    // The pen's centre, mapped through the table's own coordinate space.
     final penCentreOnScreen = Offset(
       table.left + (table.width - kTableW * scale) / 2 + pen.pos.x * scale,
       table.top + (table.height - kTableH * scale) / 2 + pen.pos.y * scale,
     );
 
-    // One of the drawn pens must be centred there, within a pen width.
+    // The painted pen must sit where its position says it does.
     final tolerance = kPenRadius * 2 * scale + 4;
-    final closest = glyphBoxes
-        .map((b) => (b.center - penCentreOnScreen).distance)
-        .reduce(math.min);
-
-    expect(closest, lessThan(tolerance),
+    expect((drawn - penCentreOnScreen).distance, lessThan(tolerance),
         reason: 'the painted pen must sit where its position says it does');
 
     // And the contact ring shares that space.

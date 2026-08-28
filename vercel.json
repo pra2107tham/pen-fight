@@ -24,7 +24,7 @@
       ]
     },
     {
-      "source": "/(index.html|flutter_service_worker.js|version.json)",
+      "source": "/(index.html|flutter_bootstrap.js|flutter_service_worker.js|version.json)",
       "headers": [
         { "key": "Cache-Control", "value": "no-cache, must-revalidate" }
       ]

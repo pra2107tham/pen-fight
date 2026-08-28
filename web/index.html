@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <!--
     If you are serving your web app in a path other than the root, change the
@@ -8,32 +8,150 @@
     The path provided below has to start and end with a slash "/" in order for
     it to work correctly.
 
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-
     This is a placeholder for base href that will be replaced by the value of
     the `--base-href` argument provided to `flutter build`.
   -->
   <base href="$FLUTTER_BASE_HREF">
 
   <meta charset="UTF-8">
-  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <!--
+    The engine sets its own viewport once it boots, but that is a couple of
+    megabytes away. Without this the splash below renders at desktop width on
+    a phone and then snaps, so it is here to cover the load.
+  -->
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="description"
+        content="The desk game: flick your pen, knock the other one off the table. Real 2D physics, 2-5 players, pass and play or online.">
+  <meta name="theme-color" content="#FBF7EC">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="pen_fight">
+  <meta name="apple-mobile-web-app-title" content="Pen Fight">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
-  <title>pen_fight</title>
+  <title>Pen Fight — the desk game</title>
   <link rel="manifest" href="manifest.json">
+
+  <meta property="og:title" content="Pen Fight">
+  <meta property="og:description"
+        content="Flick your pen, knock the other one off the table.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="icons/Icon-512.png">
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #FBF7EC;
+      /* The game is a drag-to-aim canvas. Without these, a hard flick on a
+         phone pulls the page to refresh or selects text instead. */
+      overscroll-behavior: none;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* Shown until Flutter paints its first frame, then removed. The download
+       is a couple of megabytes; without this the player watches a blank page
+       and assumes the site is broken. */
+    #boot {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      background: #FBF7EC;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      color: #14161A;
+    }
+
+    #boot .title {
+      font-size: 42px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      line-height: 0.92;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    #boot .rule {
+      width: 172px;
+      height: 9px;
+      border-radius: 5px;
+      background: #1E3FD8;
+      transform: rotate(-1.2deg);
+    }
+
+    /* Two pens, mid-flick. */
+    #boot .pens {
+      position: relative;
+      width: 190px;
+      height: 60px;
+    }
+
+    #boot .pen {
+      position: absolute;
+      top: 26px;
+      left: 10px;
+      width: 170px;
+      height: 14px;
+      border-radius: 7px;
+      box-shadow: 0 3px 0 rgba(20, 22, 26, 0.18);
+      transform-origin: 50% 50%;
+    }
+
+    #boot .pen.a { background: #1E3FD8; transform: rotate(-14deg); }
+    #boot .pen.b { background: #D62828; transform: rotate(14deg); }
+
+    @media (prefers-reduced-motion: no-preference) {
+      #boot .pen.a { animation: nudge 1.4s ease-in-out infinite alternate; }
+      #boot .pen.b { animation: nudge 1.4s ease-in-out infinite alternate-reverse; }
+    }
+
+    @keyframes nudge {
+      from { transform: rotate(-14deg) translateX(-6px); }
+      to   { transform: rotate(-8deg)  translateX(6px); }
+    }
+
+    #boot .hint {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 2.4px;
+      text-transform: uppercase;
+      color: #D62828;
+    }
+  </style>
 </head>
 <body>
+  <div id="boot">
+    <div class="hint">Desk rules · no caps off</div>
+    <div class="title">Pen<br>Fight</div>
+    <div class="rule"></div>
+    <div class="pens">
+      <div class="pen a"></div>
+      <div class="pen b"></div>
+    </div>
+  </div>
+
   <script src="flutter_bootstrap.js" async></script>
+
+  <script>
+    // Flutter fires this on window once it has painted. Anything that goes
+    // wrong before then leaves the splash up rather than a blank page, which
+    // is the better failure to have.
+    window.addEventListener('flutter-first-frame', function () {
+      var boot = document.getElementById('boot');
+      if (boot && boot.parentNode) boot.parentNode.removeChild(boot);
+    });
+  </script>
 
   <!--
     Vercel Web Analytics. The script is only served on Vercel deployments, so

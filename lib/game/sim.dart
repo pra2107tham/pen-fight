@@ -9,6 +9,7 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 const double kDt = 1 / 60;
 const double kFriction = 2.55; // velocity decay, per second
@@ -34,6 +35,17 @@ const double kMaxImpulse = 2750.0;
 /// How much forward drive a full-tip flick trades away for spin (0..1).
 const double kTipTranslationLoss = 0.45;
 
+// Precomputed once rather than per pen per tick. The physics is unchanged —
+// these are the same values the old inline expressions produced, hoisted out
+// of loops that run millions of times during an AI search.
+const double _kStopSpeedSq = kStopSpeed * kStopSpeed;
+const double _kMinDist = kPenRadius * 2;
+const double _kMinDistSq = _kMinDist * _kMinDist;
+const double _kHalfSpine = (kPenLength / 2) - kPenRadius;
+const double _kKineticDrop = kKineticFriction * kDt;
+final double _kVelDecay = math.max(0.0, 1 - kFriction * kDt);
+final double _kSpinDecay = math.max(0.0, 1 - kSpin * kDt);
+
 class Vec2 {
   final double x, y;
   const Vec2(this.x, this.y);
@@ -43,6 +55,11 @@ class Vec2 {
   Vec2 operator -(Vec2 o) => Vec2(x - o.x, y - o.y);
   Vec2 operator *(double s) => Vec2(x * s, y * s);
   double get length => math.sqrt(x * x + y * y);
+
+  /// Avoids the square root when only a comparison is needed. Every hot loop
+  /// in here goes through this rather than [length].
+  double get lengthSquared => x * x + y * y;
+
   double dot(Vec2 o) => x * o.x + y * o.y;
   Vec2 get normalized {
     final l = length;
@@ -72,7 +89,8 @@ class Pen {
     this.alive = true,
   });
 
-  bool get resting => vel.length < kStopSpeed && spin.abs() < kStopSpin;
+  bool get resting =>
+      vel.lengthSquared < _kStopSpeedSq && spin.abs() < kStopSpin;
 
   /// The pen's core segment — the capsule spine, tip to tip.
   (Vec2, Vec2) get segment {
@@ -125,26 +143,49 @@ class Pen {
       );
 }
 
-/// Closest points between segments p1..p2 and q1..q2. This is what makes the
-/// whole pen solid: contact is found wherever the bodies are actually nearest,
-/// tip-to-tip, tip-to-middle or crossed, not just at the ends.
-(Vec2, Vec2) closestPointsBetweenSegments(
-    Vec2 p1, Vec2 p2, Vec2 q1, Vec2 q2) {
-  final d1 = p2 - p1, d2 = q2 - q1, r = p1 - q1;
-  final a = d1.dot(d1), e = d2.dot(d2), f = d2.dot(r);
+// Output slots for [_closestPoints]. Returning a record here would allocate
+// two Vec2 and a tuple on every pen pair on every tick — tens of millions of
+// objects during one Ruthless search. Dart statics are per-isolate and the sim
+// is single-threaded, so plain fields are safe and free.
+double _cax = 0, _cay = 0, _cbx = 0, _cby = 0;
+
+// Per-tick scratch for each pen's spine half-vector. A pen's angle is fixed
+// for the whole collision pass, so the trig is worth doing once per pen
+// instead of once per pair; its position is not, and is re-read live below.
+Float64List _spineX = Float64List(kMaxPlayers);
+Float64List _spineY = Float64List(kMaxPlayers);
+
+/// Closest points between segments p1..p2 and q1..q2, written to [_cax]..[_cby].
+///
+/// Allocation-free twin of [closestPointsBetweenSegments]; the arithmetic is
+/// line-for-line identical, so both agree bit for bit.
+void _closestPoints(double p1x, double p1y, double p2x, double p2y,
+    double q1x, double q1y, double q2x, double q2y) {
+  final d1x = p2x - p1x, d1y = p2y - p1y;
+  final d2x = q2x - q1x, d2y = q2y - q1y;
+  final rx = p1x - q1x, ry = p1y - q1y;
+  final a = d1x * d1x + d1y * d1y;
+  final e = d2x * d2x + d2y * d2y;
+  final f = d2x * rx + d2y * ry;
 
   double s, t;
-  if (a <= 1e-9 && e <= 1e-9) return (p1, q1);
+  if (a <= 1e-9 && e <= 1e-9) {
+    _cax = p1x;
+    _cay = p1y;
+    _cbx = q1x;
+    _cby = q1y;
+    return;
+  }
   if (a <= 1e-9) {
     s = 0;
     t = (f / e).clamp(0.0, 1.0);
   } else {
-    final c = d1.dot(r);
+    final c = d1x * rx + d1y * ry;
     if (e <= 1e-9) {
       t = 0;
       s = (-c / a).clamp(0.0, 1.0);
     } else {
-      final b = d1.dot(d2);
+      final b = d1x * d2x + d1y * d2y;
       final denom = a * e - b * b;
       s = denom != 0 ? ((b * f - c * e) / denom).clamp(0.0, 1.0) : 0.0;
       t = (b * s + f) / e;
@@ -157,7 +198,19 @@ class Pen {
       }
     }
   }
-  return (p1 + d1 * s, q1 + d2 * t);
+  _cax = p1x + d1x * s;
+  _cay = p1y + d1y * s;
+  _cbx = q1x + d2x * t;
+  _cby = q1y + d2y * t;
+}
+
+/// Closest points between segments p1..p2 and q1..q2. This is what makes the
+/// whole pen solid: contact is found wherever the bodies are actually nearest,
+/// tip-to-tip, tip-to-middle or crossed, not just at the ends.
+(Vec2, Vec2) closestPointsBetweenSegments(
+    Vec2 p1, Vec2 p2, Vec2 q1, Vec2 q2) {
+  _closestPoints(p1.x, p1.y, p2.x, p2.y, q1.x, q1.y, q2.x, q2.y);
+  return (Vec2(_cax, _cay), Vec2(_cbx, _cby));
 }
 
 /// Result of one settled flick — enough for the UI to narrate what happened.
@@ -236,6 +289,15 @@ class Sim {
 
   List<Pen> get living => pens.where((p) => p.alive).toList();
 
+  /// How many pens are still on the table, without building a list for it.
+  int get livingCount {
+    var n = 0;
+    for (var i = 0; i < pens.length; i++) {
+      if (pens[i].alive) n++;
+    }
+    return n;
+  }
+
   /// Apply a flick impulse to one pen. [dir] need not be normalized;
   /// [power] is 0..1.
   ///
@@ -269,127 +331,182 @@ class Sim {
   }
 
   /// Advance one fixed tick. Returns seats hit this tick.
+  ///
+  /// Written against raw doubles rather than [Vec2] values. The arithmetic is
+  /// unchanged — same operations in the same order, so the result is bit for
+  /// bit what the vector form produced — but a tick no longer allocates a few
+  /// hundred short-lived objects. That matters because the AI runs this loop
+  /// millions of times per turn, and on the web those allocations were the
+  /// single biggest cost in the game.
   List<int> step({List<int>? knockedOff, void Function(Vec2)? onImpact}) {
-    final hits = <int>[];
-    final billed = <int>{}; // pen-pairs already charged damage this tick
+    List<int>? hits;
+    final n = pens.length;
 
-    for (final p in pens) {
+    for (var i = 0; i < n; i++) {
+      final p = pens[i];
       if (!p.alive) continue;
-      p.pos = p.pos + p.vel * kDt;
+
+      var vx = p.vel.x, vy = p.vel.y;
+      p.pos = Vec2(p.pos.x + vx * kDt, p.pos.y + vy * kDt);
       p.angle += p.spin * kDt;
 
       // Table friction: viscous drag plus a constant kinetic term, so pens
       // scrub off speed and actually come to a stop like they do on a desk
       // instead of gliding forever on an exponential tail.
-      final decay = math.max(0.0, 1 - kFriction * kDt);
-      p.vel = p.vel * decay;
-      final speed = p.vel.length;
+      vx *= _kVelDecay;
+      vy *= _kVelDecay;
+      final speed = math.sqrt(vx * vx + vy * vy);
       if (speed > 0) {
-        final drop = kKineticFriction * kDt;
-        p.vel = speed <= drop ? Vec2.zero : p.vel * ((speed - drop) / speed);
+        if (speed <= _kKineticDrop) {
+          vx = 0;
+          vy = 0;
+        } else {
+          final scale = (speed - _kKineticDrop) / speed;
+          vx *= scale;
+          vy *= scale;
+        }
       }
 
       // Spin scrubs against the felt too, and faster than sliding does.
-      p.spin *= math.max(0.0, 1 - kSpin * kDt);
+      p.spin *= _kSpinDecay;
 
-      if (p.vel.length < kStopSpeed) p.vel = Vec2.zero;
+      p.vel = (vx * vx + vy * vy) < _kStopSpeedSq ? Vec2.zero : Vec2(vx, vy);
       if (p.spin.abs() < kStopSpin) p.spin = 0;
+    }
+
+    // Angles do not change during the collision pass, so each pen's spine
+    // half-vector is computed once here rather than once per pair. Positions
+    // do change — an earlier pair can shove a pen — so those are re-read
+    // inside the loop, exactly as the vector version did.
+    if (_spineX.length < n) {
+      _spineX = Float64List(n);
+      _spineY = Float64List(n);
+    }
+    for (var i = 0; i < n; i++) {
+      final angle = pens[i].angle;
+      _spineX[i] = math.cos(angle) * _kHalfSpine;
+      _spineY[i] = math.sin(angle) * _kHalfSpine;
     }
 
     // Pen-vs-pen: the whole body is solid. Contact is resolved at the closest
     // points between the two capsule spines, so a tip, the middle, or a
     // crossed shaft all connect — and each transfers different force.
-    for (var i = 0; i < pens.length; i++) {
-      for (var j = i + 1; j < pens.length; j++) {
-        final a = pens[i], b = pens[j];
+    for (var i = 0; i < n; i++) {
+      final a = pens[i];
+      final aHalfX = _spineX[i], aHalfY = _spineY[i];
+
+      for (var j = i + 1; j < n; j++) {
+        final b = pens[j];
+        // Re-checked per pair: a pen can be knocked out by an earlier pair
+        // in this same tick.
         if (!a.alive || !b.alive) continue;
 
-        final (a1, a2) = a.segment;
-        final (b1, b2) = b.segment;
-        final (ca, cb) = closestPointsBetweenSegments(a1, a2, b1, b2);
+        final aPos = a.pos, bPos = b.pos;
+        final bHalfX = _spineX[j], bHalfY = _spineY[j];
 
-        final delta = cb - ca;
-        final dist = delta.length;
-        const minDist = kPenRadius * 2;
-        if (dist >= minDist) continue;
+        _closestPoints(
+          aPos.x - aHalfX, aPos.y - aHalfY,
+          aPos.x + aHalfX, aPos.y + aHalfY,
+          bPos.x - bHalfX, bPos.y - bHalfY,
+          bPos.x + bHalfX, bPos.y + bHalfY,
+        );
+        final cax = _cax, cay = _cay, cbx = _cbx, cby = _cby;
+
+        final dx = cbx - cax, dy = cby - cay;
+        final distSq = dx * dx + dy * dy;
+        // Far apart is overwhelmingly the common case, so reject on the
+        // squared distance and never pay for the square root.
+        if (distSq >= _kMinDistSq) continue;
+        final dist = math.sqrt(distSq);
 
         // Degenerate exact-overlap (pens crossed dead centre): push apart
         // perpendicular to A's shaft — along it would just slide B through.
-        final n = dist < 1e-9
-            ? Vec2(-math.sin(a.angle), math.cos(a.angle))
-            : delta.normalized;
+        final double nx, ny;
+        if (dist < 1e-9) {
+          nx = -math.sin(a.angle);
+          ny = math.cos(a.angle);
+        } else {
+          nx = dx / dist;
+          ny = dy / dist;
+        }
 
         // Always resolve overlap, even at rest — otherwise pens that stop
         // touching stay embedded and grind against each other forever.
-        final overlap = (minDist - dist) / 2;
-        a.pos = a.pos - n * overlap;
-        b.pos = b.pos + n * overlap;
+        final overlap = (_kMinDist - dist) / 2;
+        a.pos = Vec2(a.pos.x - nx * overlap, a.pos.y - ny * overlap);
+        b.pos = Vec2(b.pos.x + nx * overlap, b.pos.y + ny * overlap);
 
         // Lever arms from each centre of mass to the contact point.
-        final ra = ca - a.pos, rb = cb - b.pos;
+        final rax = cax - a.pos.x, ray = cay - a.pos.y;
+        final rbx = cbx - b.pos.x, rby = cby - b.pos.y;
 
         // Closing speed at the contact point, including spin.
-        final rel = b.velocityAt(cb) - a.velocityAt(ca);
-        final sep = rel.dot(n);
+        final avx = a.vel.x, avy = a.vel.y;
+        final bvx = b.vel.x, bvy = b.vel.y;
+        final relX = (bvx + -b.spin * rby) - (avx + -a.spin * ray);
+        final relY = (bvy + b.spin * rbx) - (avy + a.spin * rax);
+        final sep = relX * nx + relY * ny;
         if (sep > 0) continue; // already separating
 
-        final victim = a.vel.length > b.vel.length ? b : a;
+        final victim =
+            (avx * avx + avy * avy) > (bvx * bvx + bvy * bvy) ? b : a;
 
         // Rigid-body impulse with rotation. rn is the lever arm's leverage:
         // a hit near the centre resists (small rn) and drives the pen
         // forward; a hit near a tip spends its energy spinning instead.
-        final raCrossN = ra.x * n.y - ra.y * n.x;
-        final rbCrossN = rb.x * n.y - rb.y * n.x;
+        final raCrossN = rax * ny - ray * nx;
+        final rbCrossN = rbx * ny - rby * nx;
         final invMassSum = 2.0 +
             (raCrossN * raCrossN) / Pen.inertia +
             (rbCrossN * rbCrossN) / Pen.inertia;
         final impulse = -(1 + kRestitution) * sep / invMassSum;
 
-        a.vel = a.vel - n * impulse;
-        b.vel = b.vel + n * impulse;
-
         // Contact scrubs speed off both pens. Without this the striker keeps
         // sailing after a hit and skates off the far edge, which made almost
         // every exchange a mutual-destruction race.
-        a.vel = a.vel * kImpactDamping;
-        b.vel = b.vel * kImpactDamping;
+        a.vel = Vec2((avx - nx * impulse) * kImpactDamping,
+            (avy - ny * impulse) * kImpactDamping);
+        b.vel = Vec2((bvx + nx * impulse) * kImpactDamping,
+            (bvy + ny * impulse) * kImpactDamping);
         a.spin -= raCrossN * impulse / Pen.inertia;
         b.spin += rbCrossN * impulse / Pen.inertia;
 
         // Only a real strike does damage. Without this, two pens resting
         // in contact bill ink on every tick.
-        final speed = sep.abs();
-        if (speed < kHitSpeed) continue;
+        if (sep.abs() < kHitSpeed) continue;
 
-        onImpact?.call(Vec2((ca.x + cb.x) / 2, (ca.y + cb.y) / 2));
+        onImpact?.call(Vec2((cax + cbx) / 2, (cay + cby) / 2));
 
-        // Bill damage once per pen-pair per tick.
-        final key = i * 10 + j;
-        if (billed.contains(key)) continue;
-        billed.add(key);
-
+        // Each unordered pen pair is visited exactly once per tick, so the
+        // loop itself is what bills damage only once per pair.
+        //
         // Damage follows the momentum actually delivered, not raw closing
         // speed. The impulse already accounts for leverage, so a tip clip —
         // which spends its energy spinning the pen instead of shoving it —
         // transfers less and therefore hurts less, exactly as it should.
         final dmg = (impulse * 0.055).clamp(3.0, 30.0);
         victim.ink = math.max(0, victim.ink - dmg);
+        hits ??= <int>[];
         if (!hits.contains(victim.seat)) hits.add(victim.seat);
         if (victim.ink <= 0) victim.alive = false;
       }
     }
 
     // Off the table = instant KO, per the design's flag #1.
-    for (final p in pens) {
+    for (var i = 0; i < n; i++) {
+      final p = pens[i];
       if (!p.alive) continue;
-      if (p.pos.x < 0 || p.pos.x > width || p.pos.y < 0 || p.pos.y > height) {
+      final x = p.pos.x, y = p.pos.y;
+      if (x < 0 || x > width || y < 0 || y > height) {
         p.alive = false;
         p.vel = Vec2.zero;
         knockedOff?.add(p.seat);
       }
     }
 
-    return hits;
+    // The overwhelming majority of ticks land no hit at all; handing back a
+    // shared empty list keeps them allocation-free.
+    return hits ?? const <int>[];
   }
 
   /// Step until everything is at rest. Bounded so it always terminates.
@@ -405,14 +522,34 @@ class Sim {
         if (!hits.contains(s)) hits.add(s);
       }
       ticks++;
-      if (pens.every((p) => !p.alive || p.resting)) break;
+      if (allRested) break;
     }
     return FlickResult(ticks, hits, off, lastImpact);
   }
 
+  /// True once every pen left on the table has stopped. A plain loop rather
+  /// than `pens.every(...)`, which allocated a closure on every tick.
+  bool get allRested {
+    for (var i = 0; i < pens.length; i++) {
+      final p = pens[i];
+      if (p.alive && !p.resting) return false;
+    }
+    return true;
+  }
+
   /// True once at most one pen is left standing.
-  bool get isOver => living.length <= 1;
-  int? get winnerSeat => living.length == 1 ? living.first.seat : null;
+  bool get isOver => livingCount <= 1;
+
+  int? get winnerSeat {
+    Pen? sole;
+    for (var i = 0; i < pens.length; i++) {
+      final p = pens[i];
+      if (!p.alive) continue;
+      if (sole != null) return null;
+      sole = p;
+    }
+    return sole?.seat;
+  }
 
   /// The next seat that still has a pen on the table, rotating upward from
   /// [current]. Returns [current] if nobody else is left.
@@ -428,7 +565,8 @@ class Sim {
   Sim copy() => Sim(
         width: width,
         height: height,
-        pens: pens.map((p) => p.copy()).toList(),
+        pens: List<Pen>.generate(pens.length, (i) => pens[i].copy(),
+            growable: false),
       );
 
   List<Map<String, dynamic>> snapshot() =>
