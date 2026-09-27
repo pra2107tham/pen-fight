@@ -37,7 +37,7 @@ String? lastFailure;
 extension JoinErrorMessage on JoinError {
   String get message => switch (this) {
         JoinError.noSuchRoom => 'No table with that code',
-        JoinError.roomFull => 'That table already has two players',
+        JoinError.roomFull => 'That table is already full',
         JoinError.expired => 'That table has expired',
         JoinError.offline => 'Cannot reach the server',
         JoinError.unknown => 'Could not join that table',
@@ -161,6 +161,41 @@ class Room extends ChangeNotifier {
   /// The seat [validateRoom] assigned on the most recent successful join.
   static int lastAssignedSeat = 1;
 
+  /// How many seats the room [validateRoom] joined was opened with. Only the
+  /// room row knows the host's choice, so a joiner has to pick it up there —
+  /// otherwise its lobby deals the default two pens and the two clients
+  /// simulate different tables.
+  static int lastCapacity = 2;
+
+  /// The table size a lobby should open with.
+  ///
+  /// The host knows it, because it picked it. A joiner never did: the only
+  /// place that number lives is the room row, which [validateRoom] reads into
+  /// [lastCapacity]. Falling back to the two-pen default here dealt the joiner
+  /// a different table from the host's, so the two clients simulated different
+  /// desks from the first flick on.
+  static int capacityFor({required bool isHost, required int hostChoice}) =>
+      isHost ? hostChoice.clamp(2, kMaxPlayers) : lastCapacity;
+
+  /// How many seats [code] was opened with, or null when that cannot be read.
+  /// Used when rejoining, where this client no longer remembers the host's
+  /// choice (and for the host, which never calls [validateRoom]).
+  static Future<int?> capacityOf(String code) async {
+    if (!kOnlineEnabled) return null;
+    try {
+      final row = await _db
+          .from('rooms')
+          .select('capacity')
+          .eq('code', code)
+          .maybeSingle();
+      final capacity = (row?['capacity'] as num?)?.toInt();
+      return capacity?.clamp(2, kMaxPlayers);
+    } catch (e) {
+      debugPrint('Pen Fight: capacityOf failed for $code: $e');
+      return null;
+    }
+  }
+
   static Future<JoinError?> validateRoom(String code, String guestId) async {
     if (!kOnlineEnabled) return JoinError.offline;
     try {
@@ -179,6 +214,7 @@ class Room extends ChangeNotifier {
 
       final capacity =
           ((row['capacity'] as num?)?.toInt() ?? 2).clamp(2, kMaxPlayers);
+      lastCapacity = capacity;
 
       // Seats are stored as a list of player ids, seat 0 being the host.
       final raw = (row['guests'] as List<dynamic>?) ?? const [];
