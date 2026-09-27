@@ -68,7 +68,9 @@ class _OnlineScreenState extends State<OnlineScreen> {
         code: code,
         isHost: host,
         playerId: id,
-        capacity: host ? _capacity : null,
+        // The joiner learned the table size while validating the code; the
+        // host already knows it, because it picked it.
+        capacity: Room.capacityFor(isHost: host, hostChoice: _capacity),
       ),
     ));
   }
@@ -482,22 +484,24 @@ class _WaitingRoomState extends State<WaitingRoom> {
                 const Spacer(),
                 if (widget.isHost)
                   ChunkyButton(
-                    onTap: _room.seats.length >= 2
+                    // Every seat has to be taken before the fight starts. The
+                    // turn order walks the seats the table was dealt with, and
+                    // an empty seat has nobody to take its shot — starting
+                    // early would hand the turn to a pen no one can flick.
+                    onTap: full
                         ? () {
                             _room.sendStart();
                             _launch();
                           }
                         : null,
-                    background:
-                        _room.seats.length >= 2 ? PF.green : PF.black,
+                    background: full ? PF.green : PF.black,
                     minHeight: 60,
                     child: Text(
-                      _room.seats.length >= 2
-                          ? (full
-                              ? 'START THE FIGHT'
-                              : 'START WITH ${_room.seats.length}')
-                          : 'WAITING FOR A CHALLENGER…',
-                      style: PF.bold(_room.seats.length >= 2 ? 19 : 15,
+                      full
+                          ? 'START THE FIGHT'
+                          : 'WAITING FOR PLAYERS · '
+                              '${_room.seats.length}/${_room.capacity}',
+                      style: PF.bold(full ? 19 : 15,
                           color: Colors.white, w: 800, ls: .8),
                     ),
                   )
@@ -506,9 +510,12 @@ class _WaitingRoomState extends State<WaitingRoom> {
                     height: 60,
                     alignment: Alignment.center,
                     child: Text(
-                      full
-                          ? 'Seated. Waiting for the host to start…'
-                          : 'Connecting to the table…',
+                      !_room.usable
+                          ? 'Connecting to the table…'
+                          : full
+                              ? 'Seated. Waiting for the host to start…'
+                              : 'Waiting for players · '
+                                  '${_room.seats.length}/${_room.capacity}',
                       style: PF.bold(14,
                           w: 500, color: PF.black.withValues(alpha: .65)),
                     ),

@@ -100,6 +100,24 @@ void main() {
     expect(a.myId, isNot(b.myId));
   });
 
+  test('a joiner opens the table the host created, not the default two', () {
+    // The joiner never picked a size, so its lobby has to be built from what
+    // validateRoom read off the room row. Falling back to two gave the two
+    // clients different tables and desynced the match on the first flick.
+    addTearDown(() => Room.lastCapacity = 2);
+    Room.lastCapacity = 5;
+
+    expect(Room.capacityFor(isHost: false, hostChoice: 2), 5,
+        reason: 'the room row decides for a joiner, not the default');
+    expect(Room.capacityFor(isHost: true, hostChoice: 3), 3,
+        reason: 'the host still gets the size it picked');
+  });
+
+  test('a table size is kept inside what the game can deal', () {
+    expect(Room.capacityFor(isHost: true, hostChoice: 9), kMaxPlayers);
+    expect(Room.capacityFor(isHost: true, hostChoice: 1), 2);
+  });
+
   test('an empty room reports no peer present', () {
     final r = Room(code: 'TEST', isHost: true);
     addTearDown(r.dispose);

@@ -42,6 +42,11 @@ class _HomeScreenState extends State<HomeScreen> {
     final id = await PlayerIdentity.mine();
     // Re-validate: the table may have expired or been closed while away.
     final failure = s.isHost ? null : await Room.validateRoom(s.code, id);
+    // However many pens the host opened the table with, only the room row
+    // still remembers it after a reload. A guest already read it while
+    // re-validating, so fall back to that if the lookup fails.
+    final capacity = await Room.capacityOf(s.code) ??
+        (s.isHost ? null : Room.lastCapacity);
 
     if (!mounted) return;
     if (failure != null) {
@@ -61,6 +66,7 @@ class _HomeScreenState extends State<HomeScreen> {
             code: s.code,
             isHost: s.isHost,
             playerId: id,
+            capacity: capacity,
           ),
         ))
         .then((_) => _checkForSession());
